@@ -1,0 +1,7 @@
+ext {
+    extName = 'Local PDF'
+    extClass = '.LocalPDF'
+    extVersionCode = 1
+}
+
+apply from: "$rootDir/common.gradle"
