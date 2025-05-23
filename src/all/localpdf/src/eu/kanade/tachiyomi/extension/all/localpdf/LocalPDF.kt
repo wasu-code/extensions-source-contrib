@@ -3,7 +3,6 @@ package eu.kanade.tachiyomi.extension.all.localpdf
 import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
-import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
@@ -67,7 +66,7 @@ class LocalPDF : HttpSource() {
         val outputDir = File("/storage/B8C8-8C91/TachiyomiSY/downloads/Local PDF (ALL)/seriesA")
         outputDir.mkdirs()
 
-        val zipFile = File(outputDir, "PDF Chapter 1.zip")
+        val zipFile = File(outputDir, "PDF Chapter 1.cbz")
         convertPdfToZip(File(pdfPath), zipFile)
 
         handler.post {
@@ -87,7 +86,9 @@ class LocalPDF : HttpSource() {
                 page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                 page.close()
 
-                val imgFile = File.createTempFile("page$i", ".jpg")
+                val paddedIndex = String.format("%03d", i) // ensures 3-digit padding: 000, 001, ..., 999
+                val imgFile = File.createTempFile(paddedIndex, ".jpg")
+
                 FileOutputStream(imgFile).use { out ->
                     bitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
                 }
