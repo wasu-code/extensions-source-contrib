@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.extension.all.localpdf
 
 import android.app.Application
-import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
@@ -29,8 +28,6 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
-
-const val STRATEGY = 2
 
 @RequiresApi(Build.VERSION_CODES.O)
 class LocalPDF : HttpSource(), ConfigurableSource {
@@ -77,23 +74,12 @@ class LocalPDF : HttpSource(), ConfigurableSource {
     suspend fun getChapterList(manga: SManga): List<SChapter> {
         val mangaDir = File(INPUT_DIR, manga.url)
 
-//        val pdfFiles = mangaDir.listFiles { file -> file.extension.equals("pdf", ignoreCase = true) } ?: emptyArray()
+        val pdfFiles = mangaDir.listFiles { file -> file.extension.equals("pdf", ignoreCase = true) } ?: emptyArray()
 
-        // use fake chapters: directories with PDF's name
-//        if (pdfFiles.isEmpty()) mangaDir.listFiles { file -> file.name.endsWith(".dummy", ignoreCase = true) } ?: emptyArray()
-        // change parsing method generally to STRATEGY 2
-
-        val pdfFiles = mangaDir.listFiles { file -> file.extension.equals("pdf", ignoreCase = true) }?.takeIf { it.isNotEmpty() }
-            ?: mangaDir.listFiles { file -> file.name.endsWith(".dummy", ignoreCase = true) } ?: emptyArray()
-
-        val chapterNames = pdfFiles.map { file ->
-            file.nameWithoutExtension.replace(".dummy", "", ignoreCase = true)
-        }
-
-        return chapterNames.map { pdf ->
+        return pdfFiles.map { pdf ->
             SChapter.create().apply {
-                name = pdf
-                url = "${manga.url}/$pdf.pdf"
+                name = pdf.nameWithoutExtension
+                url = "${manga.url}/${pdf.name}"
             }
         }
     }
@@ -104,28 +90,20 @@ class LocalPDF : HttpSource(), ConfigurableSource {
             Toast.makeText(context, "Converting pages...", Toast.LENGTH_SHORT).show()
         }
 
-        if (STRATEGY == 1) {
-            val pdfPath = "$INPUT_DIR/${chapter.url}"
-            val pdfFile = File(pdfPath)
-            val chapterName = pdfFile.nameWithoutExtension
-            val mangaName = pdfFile.parentFile?.name ?: "unknown"
+        val pdfPath = "$INPUT_DIR/${chapter.url}"
+        val pdfFile = File(pdfPath)
+        val chapterName = pdfFile.nameWithoutExtension
+        val mangaName = pdfFile.parentFile?.name
 
-            val outputDir = File("$OUTPUT_DIR/$mangaName")
-            outputDir.mkdirs()
+        val outputDir = File("$OUTPUT_DIR/$mangaName")
+        outputDir.mkdirs()
 
-            val zipFile = File(outputDir, "$chapterName.cbz")
-            convertPdfToZip(File(pdfPath), zipFile)
+        val zipFile = File(outputDir, "$chapterName.cbz")
+        convertPdfToZip(File(pdfPath), zipFile)
+
+        handler.post {
             Toast.makeText(context, "Ready! You can start reading now", Toast.LENGTH_SHORT)
-                .show()
-        } else {
-            val intent = Intent().apply {
-                setClassName("eu.kanade.tachiyomi.extension.all.localpdf", "eu.kanade.tachiyomi.extension.all.localpdf.FileHandlerActivity")
-                putExtra("action", "convert")
-                putExtra("chapterPath", "$INPUT_DIR/${chapter.url}")
-                putExtra("outputDir", OUTPUT_DIR)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(intent)
+                 .show()
         }
 
         return emptyList()
@@ -188,16 +166,6 @@ class LocalPDF : HttpSource(), ConfigurableSource {
                 Toast.makeText(context, "Restart app to apply changes", Toast.LENGTH_LONG).show()
                 true
             }
-//            setOnPreferenceClickListener {
-//                val intent = Intent().apply {
-//                    setClassName(context, FileHandlerActivity::class.java.name)
-//                    putExtra("action", "safRequest")
-//                    putExtra("request_code", 1001)
-//                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-//                }
-//                context.startActivity(intent)
-//                true
-//            }
         }.also(screen::addPreference)
 
         EditTextPreference(screen.context).apply {
@@ -231,27 +199,6 @@ class LocalPDF : HttpSource(), ConfigurableSource {
                 }
             }
         }.also(screen::addPreference)
-
-        /*SwitchPreferenceCompat(screen.context).apply {
-            key = "SAF_TRIGGER_INPUT_DIR"
-            title = "SAF input dir picker"
-            summary = "does nothing"
-            setDefaultValue(false)
-            setOnPreferenceChangeListener { _, newValue ->
-                try {
-                    val intent = Intent().apply {
-                        setClassName("eu.kanade.tachiyomi.extension.all.localpdf", "eu.kanade.tachiyomi.extension.all.localpdf.SAFPickerActivity")
-                        putExtra("request_code", 1001) // or 1002 for output
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    context.startActivity(intent)
-                    true
-                } catch (e: IllegalArgumentException) {
-                    Toast.makeText(context, "Err: ${e.message}", Toast.LENGTH_LONG).show()
-                    false
-                }
-            }
-        }.also(screen::addPreference)*/
     }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException("Not Used")
