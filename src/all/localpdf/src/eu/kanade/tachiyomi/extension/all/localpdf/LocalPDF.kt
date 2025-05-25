@@ -1,15 +1,19 @@
 package eu.kanade.tachiyomi.extension.all.localpdf
 
 import android.app.Application
+import android.content.ContentResolver
+import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.widget.Toast
 import androidx.annotation.RequiresApi
+import androidx.documentfile.provider.DocumentFile
 import androidx.preference.EditTextPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -24,8 +28,10 @@ import okhttp3.Request
 import okhttp3.Response
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
+import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.FileOutputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -35,28 +41,25 @@ class LocalPDF : HttpSource(), ConfigurableSource {
     override val name = "Local PDF"
     override val lang = "all"
     override val supportsLatest = false
-
     override val baseUrl: String = ""
 
-    private val handler by lazy { Handler(Looper.getMainLooper()) }
     private val context = Injekt.get<Application>()
-
-    //    private val preferences by lazy {
-//        Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
-//    }
+    private val handler by lazy { Handler(Looper.getMainLooper()) }
     private val preferences: SharedPreferences by getPreferencesLazy()
+    private val contentResolver: ContentResolver = context.contentResolver
 
-    private val INPUT_DIR = preferences.getString("INPUT_DIR", DEFAULT_INPUT_DIR) ?: DEFAULT_INPUT_DIR
-    private val OUTPUT_DIR = preferences.getString("OUTPUT_DIR", DEFAULT_OUTPUT_DIR) ?: DEFAULT_OUTPUT_DIR
+    private val inputUri: Uri? get() = preferences.getString("INPUT_URI", null)?.let(Uri::parse)
+    private val outputUri: Uri? get() = preferences.getString("OUTPUT_URI", null)?.let(Uri::parse)
 
-    @Suppress("RedundantSuspendModifier", "UNUSED_PARAMETER")
+    @Suppress("RedundantSuspendModifier")
     suspend fun getPopularManga(page: Int): MangasPage {
-        val mangaDirs = File(INPUT_DIR).listFiles { file -> file.isDirectory } ?: emptyArray()
+        val rootFolder = inputUri?.let { DocumentFile.fromTreeUri(context, it) } ?: return MangasPage(emptyList(), false)
+        val mangaDirs = rootFolder.listFiles().filter { it.isDirectory }
 
         val mangaList = mangaDirs.map { dir ->
             SManga.create().apply {
-                title = dir.name
-                url = dir.name // Use folder name as unique URL identifier
+                title = dir.name ?: "???"
+                url = dir.uri.toString() // use URI as a unique ID
             }
         }
 
@@ -72,16 +75,16 @@ class LocalPDF : HttpSource(), ConfigurableSource {
 
     @Suppress("RedundantSuspendModifier")
     suspend fun getChapterList(manga: SManga): List<SChapter> {
-        val mangaDir = File(INPUT_DIR, manga.url)
+        val mangaDir = DocumentFile.fromTreeUri(context, Uri.parse(manga.url)) ?: return emptyList()
 
-        val pdfFiles = mangaDir.listFiles { file -> file.extension.equals("pdf", ignoreCase = true) } ?: emptyArray()
-
-        return pdfFiles.map { pdf ->
-            SChapter.create().apply {
-                name = pdf.nameWithoutExtension
-                url = "${manga.url}/${pdf.name}"
+        return mangaDir.listFiles()
+            .filter { it.name?.endsWith(".pdf", true) == true }
+            .map { pdf ->
+                SChapter.create().apply {
+                    name = pdf.name?.removeSuffix(".pdf") ?: "Chapter"
+                    url = pdf.uri.toString()
+                }
             }
-        }
     }
 
     @Suppress("RedundantSuspendModifier")
@@ -90,80 +93,88 @@ class LocalPDF : HttpSource(), ConfigurableSource {
             Toast.makeText(context, "Converting pages...", Toast.LENGTH_SHORT).show()
         }
 
-        val pdfPath = "$INPUT_DIR/${chapter.url}"
-        val pdfFile = File(pdfPath)
-        val chapterName = pdfFile.nameWithoutExtension
-        val mangaName = pdfFile.parentFile?.name
+        val chapterUri = Uri.parse(chapter.url)
+        val pdfDoc = DocumentFile.fromSingleUri(context, chapterUri) ?: return emptyList()
 
-        val outputDir = File("$OUTPUT_DIR/$mangaName")
-        outputDir.mkdirs()
+        val parentName = pdfDoc.parentFile?.name ?: "UnknownManga"
+        val chapterName = pdfDoc.name?.removeSuffix(".pdf") ?: "chapter"
 
-        val zipFile = File(outputDir, "$chapterName.cbz")
-        convertPdfToZip(File(pdfPath), zipFile)
+        val outputFolder = outputUri?.let { DocumentFile.fromTreeUri(context, it) }?.findFile(parentName)
+            ?: outputUri?.let { DocumentFile.fromTreeUri(context, it)?.createDirectory(parentName) }
+            ?: return emptyList()
+
+        val zipFile = outputFolder.findFile("$chapterName.cbz")
+            ?: outputFolder.createFile("application/zip", chapterName)
+
+        contentResolver.openInputStream(pdfDoc.uri)?.use { inputStream ->
+            contentResolver.openOutputStream(zipFile?.uri ?: return emptyList())?.use { outputStream ->
+                convertPdfToZip(inputStream, outputStream)
+            }
+        }
 
         handler.post {
-            Toast.makeText(context, "Ready! You can start reading now", Toast.LENGTH_SHORT)
-                 .show()
+            Toast.makeText(context, "Ready! You can start reading now", Toast.LENGTH_SHORT).show()
         }
 
         return emptyList()
     }
 
-    private fun convertPdfToZip(pdfFile: File, zipFile: File) {
-        val descriptor = ParcelFileDescriptor.open(pdfFile, ParcelFileDescriptor.MODE_READ_ONLY)
+    private fun convertPdfToZip(inputStream: InputStream, outputStream: OutputStream) {
+        val tempPdf = File.createTempFile("temp", ".pdf", context.cacheDir).apply {
+            deleteOnExit()
+            outputStream().use { it.write(inputStream.readBytes()) }
+        }
+
+        val descriptor = ParcelFileDescriptor.open(tempPdf, ParcelFileDescriptor.MODE_READ_ONLY)
         val renderer = PdfRenderer(descriptor)
 
-        ZipOutputStream(FileOutputStream(zipFile)).use { zipOut ->
+        ZipOutputStream(outputStream).use { zipOut ->
             for (i in 0 until renderer.pageCount) {
                 val page = renderer.openPage(i)
-
-                // Use higher resolution for better readability
-                val scale = 2 // scale factor: increase for higher DPI
+                val scale = 2
                 val width = page.width * scale
                 val height = page.height * scale
-
                 val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-
-                // Clear the bitmap to white to avoid black background
                 val canvas = android.graphics.Canvas(bitmap)
                 canvas.drawColor(android.graphics.Color.WHITE)
-
-                // Render the page
                 page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
                 page.close()
 
-                // Name like page000.jpg
                 val paddedIndex = String.format("%03d", i)
                 val imageEntryName = "page$paddedIndex.jpg"
-
-                // Write to ZIP
-                val tempImgFile = File.createTempFile("page$paddedIndex", ".jpg")
-                FileOutputStream(tempImgFile).use { out ->
-                    bitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
-                }
+                val byteStream = ByteArrayOutputStream()
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 100, byteStream)
 
                 zipOut.putNextEntry(ZipEntry(imageEntryName))
-                zipOut.write(tempImgFile.readBytes())
+                zipOut.write(byteStream.toByteArray())
                 zipOut.closeEntry()
-                tempImgFile.delete()
             }
         }
 
         renderer.close()
         descriptor.close()
+        tempPdf.delete()
     }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         EditTextPreference(screen.context).apply {
-            key = "INPUT_DIR"
+            key = "INPUT_URI"
             title = "Folder storing series in PDF format"
             dialogTitle = "Suggested: $DEFAULT_INPUT_DIR"
-            summary = preferences.getString(key, DEFAULT_INPUT_DIR) ?: DEFAULT_INPUT_DIR
-            setDefaultValue(DEFAULT_INPUT_DIR)
+            summary = preferences.getString(key, null) ?: "⚠️ Not selected"
             setOnPreferenceChangeListener { preference, newValue ->
                 val value = newValue as String
                 preference.summary = value
                 Toast.makeText(context, "Restart app to apply changes", Toast.LENGTH_LONG).show()
+                true
+            }
+            setOnPreferenceClickListener {
+                val intent = Intent().apply {
+                    setClassName(EXTENSION_PACKAGE_NAME, PICKER_ACTIVITY)
+                    putExtra("action", "safRequest")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
                 true
             }
         }.also(screen::addPreference)
@@ -171,22 +182,24 @@ class LocalPDF : HttpSource(), ConfigurableSource {
         EditTextPreference(screen.context).apply {
             key = "INFO_INPUT_DIR"
             title = ""
-            summary = """Example folder structure:
-                /storage/emulated/0/Mihon/localpdf/
-                ├── seriesName1/
-                │   ├── ch1.pdf
-                │   └── ch2.pdf
-                ├── seriesName2/
-                └── seriesName3/
+            summary = """
+                This source uses Storage Access Framework.
+                Please grant folder access in app settings.
+
+                Folder structure example:
+                /Mihon/localpdf/
+                  ├── seriesName1/
+                  │   ├── ch1.pdf
+                  │   └── ch2.pdf
+                  ├── seriesName2/
             """.trimIndent()
         }.also(screen::addPreference)
 
         EditTextPreference(screen.context).apply {
-            key = "OUTPUT_DIR"
+            key = "OUTPUT_URI"
             title = "Mihon download folder (as in Settings » Data & Storage)"
             dialogTitle = "Should end with `.../downloads/Local PDF (ALL)` and be in Mihon directory"
-            summary = preferences.getString(key, DEFAULT_OUTPUT_DIR) ?: DEFAULT_OUTPUT_DIR
-            setDefaultValue(DEFAULT_OUTPUT_DIR)
+            summary = preferences.getString(key, null) ?: "⚠️ Not selected"
             setOnPreferenceChangeListener { preference, newValue ->
                 val value = newValue as String
                 return@setOnPreferenceChangeListener if (value.endsWith("downloads/Local PDF (ALL)")) {
@@ -197,6 +210,15 @@ class LocalPDF : HttpSource(), ConfigurableSource {
                     Toast.makeText(screen.context, "Path must end with `downloads/Local PDF (ALL)`", Toast.LENGTH_LONG).show()
                     false // Reject the value
                 }
+            }
+            setOnPreferenceClickListener {
+                val intent = Intent().apply {
+                    setClassName(EXTENSION_PACKAGE_NAME, PICKER_ACTIVITY)
+                    putExtra("action", "safRequest")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                true
             }
         }.also(screen::addPreference)
     }
@@ -214,6 +236,9 @@ class LocalPDF : HttpSource(), ConfigurableSource {
 
     companion object {
         const val DEFAULT_INPUT_DIR = "/storage/emulated/0/Mihon/localpdf"
-        const val DEFAULT_OUTPUT_DIR = "/storage/emulated/0/Mihon/downloads/Local PDF (ALL)"
+
+//        const val DEFAULT_OUTPUT_DIR = "/storage/emulated/0/Mihon/downloads/Local PDF (ALL)"
+        const val EXTENSION_PACKAGE_NAME = "eu.kanade.tachiyomi.extension.all.localpdf"
+        const val PICKER_ACTIVITY = "eu.kanade.tachiyomi.extension.all.localpdf.SAFPickerActivity"
     }
 }
