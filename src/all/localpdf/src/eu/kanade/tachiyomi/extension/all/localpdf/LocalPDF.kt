@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.extension.all.localpdf
 
 import android.app.Application
 import android.content.ContentResolver
+import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Bitmap
@@ -11,9 +12,9 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.provider.DocumentsContract
 import android.widget.Toast
 import androidx.annotation.RequiresApi
-import androidx.documentfile.provider.DocumentFile
 import androidx.preference.EditTextPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -41,7 +42,7 @@ class LocalPDF : HttpSource(), ConfigurableSource {
     override val name = "Local PDF"
     override val lang = "all"
     override val supportsLatest = false
-    override val baseUrl: String = ""
+    override val baseUrl = ""
 
     private val context = Injekt.get<Application>()
     private val handler by lazy { Handler(Looper.getMainLooper()) }
@@ -51,63 +52,63 @@ class LocalPDF : HttpSource(), ConfigurableSource {
     private val inputUri: Uri? get() = preferences.getString("INPUT_URI", null)?.let(Uri::parse)
     private val outputUri: Uri? get() = preferences.getString("OUTPUT_URI", null)?.let(Uri::parse)
 
-    @Suppress("RedundantSuspendModifier")
     suspend fun getPopularManga(page: Int): MangasPage {
-        val rootFolder = inputUri?.let { DocumentFile.fromTreeUri(context, it) } ?: return MangasPage(emptyList(), false)
-        val mangaDirs = rootFolder.listFiles().filter { it.isDirectory }
+        val root = inputUri ?: return MangasPage(emptyList(), false)
+        val seriesDirs = SAFFileUtils.listFiles(context, root).filter {
+            SAFFileUtils.isDirectory(context, it)
+        }
 
-        val mangaList = mangaDirs.map { dir ->
+        val mangaList = seriesDirs.map { dirUri ->
             SManga.create().apply {
-                title = dir.name ?: "???"
-                url = dir.uri.toString() // use URI as a unique ID
+                title = SAFFileUtils.getFileName(context, dirUri) ?: "???"
+                url = dirUri.toString()
             }
         }
 
         return MangasPage(mangaList, hasNextPage = false)
     }
 
-    @Suppress("RedundantSuspendModifier")
     suspend fun getMangaDetails(manga: SManga): SManga {
         manga.description = "This manga is generated from PDF"
         manga.status = SManga.COMPLETED
         return manga
     }
 
-    @Suppress("RedundantSuspendModifier")
     suspend fun getChapterList(manga: SManga): List<SChapter> {
-        val mangaDir = DocumentFile.fromTreeUri(context, Uri.parse(manga.url)) ?: return emptyList()
+        val mangaUri = Uri.parse(manga.url)
+        val children = SAFFileUtils.listFiles(context, mangaUri)
 
-        return mangaDir.listFiles()
-            .filter { it.name?.endsWith(".pdf", true) == true }
-            .map { pdf ->
-                SChapter.create().apply {
-                    name = pdf.name?.removeSuffix(".pdf") ?: "Chapter"
-                    url = pdf.uri.toString()
-                }
+        return children.filter {
+            SAFFileUtils.getFileName(context, it)?.endsWith(".pdf", ignoreCase = true) == true
+        }.map { pdfUri ->
+            SChapter.create().apply {
+                name = SAFFileUtils.getFileName(context, pdfUri)?.removeSuffix(".pdf") ?: "Chapter"
+                url = pdfUri.toString()
             }
+        }
     }
 
-    @Suppress("RedundantSuspendModifier")
     suspend fun getPageList(chapter: SChapter): List<Page> {
         handler.post {
             Toast.makeText(context, "Converting pages...", Toast.LENGTH_SHORT).show()
         }
 
         val chapterUri = Uri.parse(chapter.url)
-        val pdfDoc = DocumentFile.fromSingleUri(context, chapterUri) ?: return emptyList()
+        val chapterName = SAFFileUtils.getFileName(context, chapterUri)?.removeSuffix(".pdf") ?: "chapter"
+        val parentUri = SAFFileUtils.getParentUri(chapterUri) ?: return emptyList()
+        val parentName = SAFFileUtils.getFileName(context, parentUri) ?: "UnknownManga"
 
-        val parentName = pdfDoc.parentFile?.name ?: "UnknownManga"
-        val chapterName = pdfDoc.name?.removeSuffix(".pdf") ?: "chapter"
-
-        val outputFolder = outputUri?.let { DocumentFile.fromTreeUri(context, it) }?.findFile(parentName)
-            ?: outputUri?.let { DocumentFile.fromTreeUri(context, it)?.createDirectory(parentName) }
+        val outputRoot = outputUri ?: return emptyList()
+        val outputMangaUri = SAFFileUtils.findFile(context, outputRoot, parentName)
+            ?: SAFFileUtils.createDirectory(context, outputRoot, parentName)
             ?: return emptyList()
 
-        val zipFile = outputFolder.findFile("$chapterName.cbz")
-            ?: outputFolder.createFile("application/zip", chapterName)
+        val zipUri = SAFFileUtils.findFile(context, outputMangaUri, "$chapterName.cbz")
+            ?: SAFFileUtils.createFile(context, outputMangaUri, "application/zip", chapterName)
+            ?: return emptyList()
 
-        contentResolver.openInputStream(pdfDoc.uri)?.use { inputStream ->
-            contentResolver.openOutputStream(zipFile?.uri ?: return emptyList())?.use { outputStream ->
+        contentResolver.openInputStream(chapterUri)?.use { inputStream ->
+            contentResolver.openOutputStream(zipUri)?.use { outputStream ->
                 convertPdfToZip(inputStream, outputStream)
             }
         }
@@ -205,10 +206,10 @@ class LocalPDF : HttpSource(), ConfigurableSource {
                 return@setOnPreferenceChangeListener if (value.endsWith("downloads/Local PDF (ALL)")) {
                     preference.summary = value
                     Toast.makeText(context, "Restart app to apply changes", Toast.LENGTH_LONG).show()
-                    true // Save the new value
+                    true
                 } else {
                     Toast.makeText(screen.context, "Path must end with `downloads/Local PDF (ALL)`", Toast.LENGTH_LONG).show()
-                    false // Reject the value
+                    false
                 }
             }
             setOnPreferenceClickListener {
@@ -236,9 +237,67 @@ class LocalPDF : HttpSource(), ConfigurableSource {
 
     companion object {
         const val DEFAULT_INPUT_DIR = "/storage/emulated/0/Mihon/localpdf"
-
-//        const val DEFAULT_OUTPUT_DIR = "/storage/emulated/0/Mihon/downloads/Local PDF (ALL)"
         const val EXTENSION_PACKAGE_NAME = "eu.kanade.tachiyomi.extension.all.localpdf"
         const val PICKER_ACTIVITY = "eu.kanade.tachiyomi.extension.all.localpdf.SAFPickerActivity"
+    }
+}
+
+object SAFFileUtils {
+
+    fun listFiles(context: Context, uri: Uri): List<Uri> {
+        val children = mutableListOf<Uri>()
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+            uri,
+            DocumentsContract.getDocumentId(uri),
+        )
+
+        context.contentResolver.query(childrenUri, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID), null, null, null)?.use { cursor ->
+            val idIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+            while (cursor.moveToNext()) {
+                val docId = cursor.getString(idIndex)
+                val childUri = DocumentsContract.buildDocumentUriUsingTree(uri, docId)
+                children.add(childUri)
+            }
+        }
+
+        return children
+    }
+
+    fun getFileName(context: Context, uri: Uri): String? {
+        return context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+            if (cursor.moveToFirst()) cursor.getString(index) else null
+        }
+    }
+
+    fun isDirectory(context: Context, uri: Uri): Boolean {
+        return context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+            if (cursor.moveToFirst()) DocumentsContract.Document.MIME_TYPE_DIR == cursor.getString(index) else false
+        } ?: false
+    }
+
+    fun findFile(context: Context, parentUri: Uri, name: String): Uri? {
+        return listFiles(context, parentUri).firstOrNull {
+            getFileName(context, it) == name
+        }
+    }
+
+    fun createFile(context: Context, parentUri: Uri, mimeType: String, name: String): Uri? {
+        return DocumentsContract.createDocument(context.contentResolver, parentUri, mimeType, name)
+    }
+
+    fun createDirectory(context: Context, parentUri: Uri, name: String): Uri? {
+        return DocumentsContract.createDocument(context.contentResolver, parentUri, DocumentsContract.Document.MIME_TYPE_DIR, name)
+    }
+
+    fun getParentUri(uri: Uri): Uri {
+        val pathSegments = uri.pathSegments
+        val parentSegments = pathSegments.dropLast(1)
+        val builder = uri.buildUpon().path("")
+        for (segment in parentSegments) {
+            builder.appendPath(segment)
+        }
+        return builder.build()
     }
 }
