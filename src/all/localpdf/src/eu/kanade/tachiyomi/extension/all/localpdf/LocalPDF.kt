@@ -33,11 +33,11 @@ import java.util.zip.ZipOutputStream
 
 @RequiresApi(Build.VERSION_CODES.O)
 class LocalPDF : HttpSource(), ConfigurableSource {
-    //to temporary hide java.lang.LinkageError
-    //remove stdlib dependency from build.gradle
+    // to temporary hide java.lang.LinkageError
+    // remove stdlib dependency from build.gradle
     // sync and build
-    //open Mihon
-    //readd dependency, sync and build
+    // open Mihon
+    // readd dependency, sync and build
 
     override val name = "Local PDF"
     override val lang = "all"
@@ -140,7 +140,7 @@ class LocalPDF : HttpSource(), ConfigurableSource {
             Toast.makeText(context, "Ready! You can start reading now", Toast.LENGTH_SHORT)
                 .show()
         } else {
-            storageAction("convert", "/storage/855C-938E/TachiyomiSY/SerA/Iris.pdf", "/storage/855C-938E/TachiyomiSY")
+            storageAction("convert", "$INPUT_DIR/${chapter.url}", OUTPUT_DIR)
         }
 
         return emptyList()
@@ -198,10 +198,11 @@ class LocalPDF : HttpSource(), ConfigurableSource {
 //            putExtra("toAAA", to)
 //            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 //        }
-        val intent = Intent(context, FileHandlerActivity::class.java).apply {
+        val intent = Intent().apply {
+            setClassName(EXTENSION_PACKAGE_NAME, HELPER_ACTIVITY)
             putExtra("action", action)
-            putExtra("from", from)
-            putExtra("to", to)
+            putExtra("A", from)
+            putExtra("B", to)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
 

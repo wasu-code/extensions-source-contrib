@@ -16,7 +16,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 class FileHandlerActivity : Activity() {
-
+    //TODO make this activity into separate app to mitigate LinkingError
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -27,10 +27,10 @@ class FileHandlerActivity : Activity() {
         }
 
         val action = intent.getStringExtra("action")
-        val inputPath = intent.getStringExtra("from")
-        val outputPath = intent.getStringExtra("to")
+        val inputPath = intent.getStringExtra("A")
+        val outputPath = intent.getStringExtra("B")
 
-        Toast.makeText(this, "$action: $inputPath >> $outputPath", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "$action: \n$inputPath\n$outputPath", Toast.LENGTH_SHORT).show()
 
         if (action == "generateChapterDummies") {
             if (inputPath == null) {
@@ -59,21 +59,21 @@ class FileHandlerActivity : Activity() {
         }
 
         if (action == "convert") {
-//            if (inputPath == null) {
-//                Toast.makeText(this, "Missing input path", Toast.LENGTH_LONG).show()
-//                finish()
-//                return
-//            }
+            if (inputPath == null) {
+                Toast.makeText(this, "Missing input path", Toast.LENGTH_LONG).show()
+                finish()
+                return
+            }
 
             val pdfFile = File(inputPath)
             val chapterName = pdfFile.nameWithoutExtension
-            val mangaName = pdfFile.parentFile!!.name
+            val mangaName = pdfFile.parentFile?.name ?: "missing_manga_name"
 
             val outputDir = File(outputPath, mangaName)
             outputDir.mkdirs()
 
             val zipFile = File(outputDir, "$chapterName.cbz")
-
+            Toast.makeText(this, "$zipFile", Toast.LENGTH_LONG).show()
             try {
                 convertPdfToZip(pdfFile, zipFile)
                 Toast.makeText(this, "Conversion complete: $chapterName", Toast.LENGTH_LONG).show()
@@ -93,20 +93,27 @@ class FileHandlerActivity : Activity() {
             for (i in 0 until renderer.pageCount) {
                 val page = renderer.openPage(i)
 
-                val scale = 2
+                // Use higher resolution for better readability
+                val scale = 2 // scale factor: increase for higher DPI
                 val width = page.width * scale
                 val height = page.height * scale
 
                 val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                val canvas = Canvas(bitmap)
-                canvas.drawColor(Color.WHITE)
+
+                // Clear the bitmap to white to avoid black background
+                val canvas = android.graphics.Canvas(bitmap)
+                canvas.drawColor(android.graphics.Color.WHITE)
+
+                // Render the page
                 page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
                 page.close()
 
+                // Name like page000.jpg
                 val paddedIndex = String.format("%03d", i)
                 val imageEntryName = "page$paddedIndex.jpg"
 
-                val tempImgFile = File.createTempFile("page$paddedIndex", ".jpg", cacheDir)
+                // Write to ZIP
+                val tempImgFile = File.createTempFile("page$paddedIndex", ".jpg")
                 FileOutputStream(tempImgFile).use { out ->
                     bitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
                 }
