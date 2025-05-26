@@ -1,6 +1,9 @@
+@file:Suppress("unused", "RedundantSuspendModifier", "UNUSED_PARAMETER")
+
 package eu.kanade.tachiyomi.extension.all.localpdf
 
 import android.app.Application
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Bitmap
@@ -33,11 +36,6 @@ import java.util.zip.ZipOutputStream
 
 @RequiresApi(Build.VERSION_CODES.O)
 class LocalPDF : HttpSource(), ConfigurableSource {
-    // to temporary hide java.lang.LinkageError
-    // remove stdlib dependency from build.gradle
-    // sync and build
-    // open Mihon
-    // readd dependency, sync and build
 
     override val name = "Local PDF"
     override val lang = "all"
@@ -47,24 +45,24 @@ class LocalPDF : HttpSource(), ConfigurableSource {
     companion object {
         const val DEFAULT_INPUT_DIR = "/storage/emulated/0/Mihon/localpdf"
         const val DEFAULT_OUTPUT_DIR = "/storage/emulated/0/Mihon/downloads/Local PDF (ALL)"
-        const val EXTENSION_PACKAGE_NAME = "eu.kanade.tachiyomi.extension.all.localpdf"
-        const val HELPER_ACTIVITY = "eu.kanade.tachiyomi.extension.all.localpdf.FileHandlerActivity"
+        const val COMPANION_PACKAGE_NAME = "eu.kanade.tachiyomi.extension.all.localpdf.companion"
+        const val HELPER_ACTIVITY = "$COMPANION_PACKAGE_NAME.FileHandlerActivity"
     }
-
-    private var helperNeeded = false
 
     private val handler by lazy { Handler(Looper.getMainLooper()) }
     private val context = Injekt.get<Application>()
-
-    //    private val preferences by lazy {
-//        Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
-//    }
     private val preferences: SharedPreferences by getPreferencesLazy()
 
     private val INPUT_DIR = preferences.getString("INPUT_DIR", DEFAULT_INPUT_DIR) ?: DEFAULT_INPUT_DIR
     private val OUTPUT_DIR = preferences.getString("OUTPUT_DIR", DEFAULT_OUTPUT_DIR) ?: DEFAULT_OUTPUT_DIR
 
-    @Suppress("RedundantSuspendModifier", "UNUSED_PARAMETER")
+    private fun isHelperNeeded(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return !Environment.isExternalStorageManager()
+        }
+        return false
+    }
+
     suspend fun getPopularManga(page: Int): MangasPage {
         val mangaDirs = File(INPUT_DIR).listFiles { file -> file.isDirectory } ?: emptyArray()
 
@@ -78,25 +76,15 @@ class LocalPDF : HttpSource(), ConfigurableSource {
         return MangasPage(mangaList, hasNextPage = false)
     }
 
-    @Suppress("RedundantSuspendModifier")
     suspend fun getMangaDetails(manga: SManga): SManga {
         manga.description = "This manga is generated from PDF"
         manga.status = SManga.COMPLETED
         return manga
     }
 
-    @Suppress("RedundantSuspendModifier")
     suspend fun getChapterList(manga: SManga): List<SChapter> {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            if (!Environment.isExternalStorageManager()) {
-                helperNeeded = true
-//                handler.post {
-//                    Toast.makeText(context, "Missing permission: 'Manage all files'.", Toast.LENGTH_LONG).show()
-//                }
-            }
-        }
-
         val mangaDir = File(INPUT_DIR, manga.url)
+        val helperNeeded = isHelperNeeded()
         if (helperNeeded) storageAction("generateChapterDummies", mangaDir.toString(), null)
 
         val pdfFiles = if (!helperNeeded) {
@@ -120,13 +108,12 @@ class LocalPDF : HttpSource(), ConfigurableSource {
         }
     }
 
-    @Suppress("RedundantSuspendModifier")
     suspend fun getPageList(chapter: SChapter): List<Page> {
         handler.post {
-            Toast.makeText(context, "Converting pages...", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Converting pages... (ignore No Pages toast)", Toast.LENGTH_SHORT).show()
         }
 
-        if (!helperNeeded) {
+        if (!isHelperNeeded()) {
             val pdfPath = "$INPUT_DIR/${chapter.url}"
             val pdfFile = File(pdfPath)
             val chapterName = pdfFile.nameWithoutExtension
@@ -191,22 +178,25 @@ class LocalPDF : HttpSource(), ConfigurableSource {
     }
 
     private fun storageAction(action: String, from: String?, to: String?) {
-//        val intent = Intent().apply {
-//            setClassName(EXTENSION_PACKAGE_NAME, HELPER_ACTIVITY)
-//            putExtra("action", action)
-//            putExtra("fromAAA", from)
-//            putExtra("toAAA", to)
-//            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-//        }
+        handler.post {
+            Toast.makeText(context, "Requesting help from Companion app (if installed)", Toast.LENGTH_LONG).show()
+        }
+
         val intent = Intent().apply {
-            setClassName(EXTENSION_PACKAGE_NAME, HELPER_ACTIVITY)
+            setClassName(COMPANION_PACKAGE_NAME, HELPER_ACTIVITY)
             putExtra("action", action)
             putExtra("A", from)
             putExtra("B", to)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
 
-        context.startActivity(intent)
+        try {
+            context.startActivity(intent)
+        } catch (e: ActivityNotFoundException) {
+            handler.post {
+                Toast.makeText(context, "Companion app not installed (ActivityNotFoundException)", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
