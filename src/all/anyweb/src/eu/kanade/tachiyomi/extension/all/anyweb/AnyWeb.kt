@@ -4,6 +4,7 @@ import android.content.SharedPreferences
 import androidx.preference.CheckBoxPreference
 import androidx.preference.EditTextPreference
 import androidx.preference.PreferenceScreen
+import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -11,6 +12,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.ParsedHttpSource
+import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.getPreferencesLazy
 import kotlinx.coroutines.runBlocking
 import okhttp3.Request
@@ -20,6 +22,8 @@ import org.jsoup.nodes.Element
 import rx.Observable
 
 val urlRegex = """^(?:https?://)?(?:[\w-]+\.)+[a-z]{2,6}(?:/\S*)?$""".toRegex()
+const val INDEX_PREFIX = "index:"
+
 const val EXCLUDE_SELECTOR_DEFAULTS = "nav, footer, header, aside, .comments"
 const val EXCLUDE_KEYWORDS_DEFAULTS = "avatar, icon, profile"
 const val EXCLUDE_URL_KEYWORDS_DEFAULTS = "avatar, icon, profile"
@@ -36,8 +40,10 @@ class AnyWeb : ConfigurableSource, ParsedHttpSource() {
     private val preferences: SharedPreferences by getPreferencesLazy()
 
     override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
-        if (!urlRegex.matches(query)) throw IllegalArgumentException("Query is not a URL")
-        val websiteUrl = if (query.startsWith("http://") || query.startsWith("https://")) query else "http://$query"
+        val websiteUrl = query.removePrefix(INDEX_PREFIX).let { stripped ->
+            require(urlRegex.matches(stripped)) { "Query is not a URL" }
+            if (stripped.startsWith("http://") || stripped.startsWith("https://")) stripped else "http://$stripped"
+        }
 
         return Observable.just(
             MangasPage(
@@ -45,7 +51,7 @@ class AnyWeb : ConfigurableSource, ParsedHttpSource() {
                     SManga.create().apply {
                         title = "Click to load"
                         url = websiteUrl
-                        genre = websiteUrl // Will serve as storage for chapter list
+                        genre = if (query.startsWith(INDEX_PREFIX)) "index" else websiteUrl // Will serve as storage for chapter list
                     },
                 ),
                 false,
@@ -69,6 +75,19 @@ class AnyWeb : ConfigurableSource, ParsedHttpSource() {
     }
 
     override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> {
+        // choose chapter parsing strategy
+        return if (manga.genre
+            ?.split(",")
+            ?.map { it.trim().lowercase() }
+            ?.contains("index") == true
+        ) {
+            chaptersFromIndex(manga)
+        } else {
+            chaptersFromGenre(manga)
+        }
+    }
+
+    private fun chaptersFromGenre(manga: SManga): Observable<List<SChapter>> {
         return Observable.just(
             manga.genre?.split(",")?.map { it.trim() }?.mapIndexed { index, url ->
                 SChapter.create().apply {
@@ -77,6 +96,55 @@ class AnyWeb : ConfigurableSource, ParsedHttpSource() {
                 }
             }?.reversed() ?: emptyList(),
         )
+    }
+
+    private fun chaptersFromIndex(manga: SManga): Observable<List<SChapter>> {
+        return Observable.fromCallable {
+            val document = client.newCall(GET(manga.url, headers)).execute().asJsoup()
+
+            val maxDepth = 3
+
+            val selectors = mutableListOf<String>()
+            val weights = mutableListOf<Int>()
+
+            for (d in 1..maxDepth) {
+                val path = List(d) { "> *" }.joinToString(" ")
+                val selector = ("$path > a")
+                    .replace("> * > a", "> a") // fix for depth=1
+                selectors += selector
+                weights += maxOf(1, maxDepth - (d - 1)) // e.g. depth 1 = 3, depth 2 = 2, etc.
+            }
+
+            val candidates = document.select("*").filter { element ->
+                selectors.any { sel -> element.select(sel).isNotEmpty() }
+            }
+
+            var bestScore = 0
+            var bestContainer: Element? = null
+
+            for (container in candidates) {
+                var score = 0
+                for ((i, sel) in selectors.withIndex()) {
+                    val count = container.select(sel).size
+                    score += count * weights[i]
+                }
+
+                if (score > bestScore) {
+                    bestScore = score
+                    bestContainer = container
+                }
+            }
+
+            val chapters = bestContainer?.select("a")?.mapIndexed { index, a ->
+                SChapter.create().apply {
+                    name = a.text().ifBlank { "Untitled" }
+                    url = a.absUrl("href")
+                    chapter_number = index.toFloat()
+                }
+            } ?: emptyList()
+
+            chapters.reversed()
+        }
     }
 
     override fun pageListParse(document: Document): List<Page> {
@@ -189,8 +257,7 @@ class AnyWeb : ConfigurableSource, ParsedHttpSource() {
             key = "INFO"
             title = "ℹ️ INFO"
             summary = "After changing settings below you may need to 'Clear chapter cache' in 'Settings > Data and Storage' in order to apply them to already loaded chapters."
-            dialogTitle = "Nothing to do here."
-            setDefaultValue("Get out")
+            setEnabled(false)
         }.also(screen::addPreference)
 
         CheckBoxPreference(screen.context).apply {
@@ -279,27 +346,58 @@ class AnyWeb : ConfigurableSource, ParsedHttpSource() {
                 editText.inputType = android.text.InputType.TYPE_CLASS_NUMBER
             }
         }.also(screen::addPreference)
+
+        EditTextPreference(screen.context).apply {
+            key = "INDEX_DEPTH"
+            title = "Index Depth"
+            dialogTitle = "Set Index Depth"
+            summary = """
+                Defines how deep the DOM is scanned to auto-detect chapter links (when searching index:<url>).
+                Setting this to 1 will detect only links that are placed one after another in the DOM (e.g. in a single list or container).
+                Higher values increase scan depth and may help when dealing with chapters divided into sections.
+                Setting this value too high might make the extension detect all links on a webpage.
+                Recommended: 1–3.
+            """.trimIndent()
+            setDefaultValue("3")
+            setOnBindEditTextListener { editText ->
+                editText.inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            }
+        }.also(screen::addPreference)
+
+        EditTextPreference(screen.context).apply {
+            key = "INFO_INDEX"
+            title = "ℹ️ KNOWN ISSUES"
+            summary = """
+                🛑 Issue:
+                If user search for url and then try to prefix it with `index:` that won't work (until cache is cleared).
+                URL is the same for both index and non-index entries, so they are considered the same by the app (and therefore not fetched again).
+
+                🛠️ Fix:
+                If host app allows tag editing: add entry to library and add "index" tag.
+            """.trimIndent()
+            setEnabled(false)
+        }.also(screen::addPreference)
     }
 
     // =================================Not Used=====================================================
-    override fun popularMangaRequest(page: Int): Request = throw UnsupportedOperationException()
-    override fun popularMangaSelector(): String = throw UnsupportedOperationException()
-    override fun popularMangaFromElement(element: Element): SManga = throw UnsupportedOperationException()
-    override fun popularMangaNextPageSelector(): String = throw UnsupportedOperationException()
+    override fun popularMangaRequest(page: Int): Request = throw UnsupportedOperationException("\n\nPaste url or index:<url> in search bar")
+    override fun popularMangaSelector(): String = throw UnsupportedOperationException("Not used")
+    override fun popularMangaFromElement(element: Element): SManga = throw UnsupportedOperationException("Not used")
+    override fun popularMangaNextPageSelector(): String = throw UnsupportedOperationException("Not used")
 
-    override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException()
-    override fun latestUpdatesSelector(): String = throw UnsupportedOperationException()
-    override fun latestUpdatesFromElement(element: Element): SManga = throw UnsupportedOperationException()
-    override fun latestUpdatesNextPageSelector(): String = throw UnsupportedOperationException()
+    override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException("Not used")
+    override fun latestUpdatesSelector(): String = throw UnsupportedOperationException("Not used")
+    override fun latestUpdatesFromElement(element: Element): SManga = throw UnsupportedOperationException("Not used")
+    override fun latestUpdatesNextPageSelector(): String = throw UnsupportedOperationException("Not used")
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request = throw UnsupportedOperationException()
+    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request = throw UnsupportedOperationException("Not used")
 
-    override fun searchMangaSelector(): String = throw UnsupportedOperationException()
-    override fun searchMangaNextPageSelector(): String = throw UnsupportedOperationException()
-    override fun searchMangaFromElement(element: Element): SManga = throw UnsupportedOperationException()
+    override fun searchMangaSelector(): String = throw UnsupportedOperationException("Not used")
+    override fun searchMangaNextPageSelector(): String = throw UnsupportedOperationException("Not used")
+    override fun searchMangaFromElement(element: Element): SManga = throw UnsupportedOperationException("Not used")
 
-    override fun chapterListSelector(): String = throw UnsupportedOperationException()
-    override fun chapterFromElement(element: Element): SChapter = throw UnsupportedOperationException()
+    override fun chapterListSelector(): String = throw UnsupportedOperationException("Not used")
+    override fun chapterFromElement(element: Element): SChapter = throw UnsupportedOperationException("Not used")
 
-    override fun imageUrlParse(document: Document): String = throw UnsupportedOperationException()
+    override fun imageUrlParse(document: Document): String = throw UnsupportedOperationException("Not used")
 }
