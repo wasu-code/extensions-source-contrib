@@ -66,8 +66,8 @@ class LocalPDF : HttpSource(), ConfigurableSource {
     }
 
     suspend fun getPopularManga(page: Int): MangasPage {
-        val inputDir = getInputDir()
-        val mangaDirs = inputDir?.listFiles()?.filter { it.isDirectory } ?: emptyList()
+        val inputDir = getInputDir() ?: throw IllegalStateException("Input directory URI is not set.\nPlease set it first in the extension's settings.")
+        val mangaDirs = inputDir.listFiles()?.filter { it.isDirectory } ?: emptyList()
 
         val mangaList = mangaDirs.map { dir ->
             SManga.create().apply {
@@ -89,9 +89,10 @@ class LocalPDF : HttpSource(), ConfigurableSource {
         val inputDir = getInputDir()
         val mangaDir = inputDir?.findFile(manga.url)?.takeIf { it.isDirectory }
 
-        val pdfFiles = mangaDir?.listFiles()?.filter {
-            it.name?.endsWith(".pdf", ignoreCase = true) == true
-        } ?: emptyList()
+        val pdfFiles = mangaDir?.listFiles()
+            ?.filter { it.name?.endsWith(".pdf", ignoreCase = true) == true }
+            ?.sortedByDescending { it.name?.lowercase() }
+            ?: emptyList()
 
         return pdfFiles.map { pdf ->
             SChapter.create().apply {
@@ -114,7 +115,7 @@ class LocalPDF : HttpSource(), ConfigurableSource {
 
     suspend fun getPageList(chapter: SChapter): List<Page> {
         handler.post {
-            Toast.makeText(context, "Converting pages... \n(ignore \"No Pages\" toast)", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Converting pages...", Toast.LENGTH_SHORT).show()
         }
 
         val mangaName = chapter.url.substringBefore("/")
@@ -156,7 +157,7 @@ class LocalPDF : HttpSource(), ConfigurableSource {
                 val page = renderer.openPage(i)
 
                 // Use higher resolution for better readability
-                val scale = 1 // scale factor: increase for higher DPI
+                val scale = 2 // scale factor: increase for higher DPI
                 val width = page.width * scale
                 val height = page.height * scale
 
@@ -194,14 +195,18 @@ class LocalPDF : HttpSource(), ConfigurableSource {
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         EditTextPreference(screen.context).apply {
             key = "MIHON_URI"
-            title = """URI to Mihon root directory
-                Same as "Settings » Data and storage » Storage loaction"
-            """.trimIndent()
+            title = "URI to Mihon root directory"
             dialogTitle = "[...]/Mihon"
-            summary = preferences.getString(key, "Not set")
+            summary = """
+                Same as in "Settings » Data and storage » Storage location".
+                Current: ${preferences.getString(key, "Not set")}
+            """.trimIndent()
             setOnPreferenceChangeListener { preference, newValue ->
                 val value = newValue as String
-                preference.summary = value
+                preference.summary = """
+                    Same as "Settings » Data and storage » Storage location".
+                    Current: $value
+                """.trimIndent()
                 Toast.makeText(context, "Restart app to apply changes", Toast.LENGTH_LONG).show()
                 true
             }
@@ -219,12 +224,12 @@ class LocalPDF : HttpSource(), ConfigurableSource {
             key = "INFO_INPUT_DIR"
             title = ""
             summary = """Example folder structure:
-                /storage/emulated/0/Mihon/localpdf/
-                ├── seriesName1/
-                │   ├── ch1.pdf
-                │   └── ch2.pdf
-                ├── seriesName2/
-                └── seriesName3/
+              /storage/emulated/0/Mihon/localpdf/
+              ├── seriesName1/
+              │   ├── ch1.pdf
+              │   └── ch2.pdf
+              ├── seriesName2/
+              └── seriesName3/
             """.trimIndent()
             setEnabled(false)
         }.also(screen::addPreference)
