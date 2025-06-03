@@ -51,11 +51,18 @@ class LocalPDF : HttpSource(), ConfigurableSource {
     private val mihonUri = preferences.getString("MIHON_URI", null)?.let { Uri.parse(it) }
 
     private fun getInputDir(): UniFile? {
-        return mihonUri?.let { UniFile.fromUri(context, it)?.findFile("localpdf") }
+        return mihonUri?.let {
+            UniFile.fromUri(context, it)
+                ?.findFile("localpdf")
+        }
     }
 
     private fun getOutputDir(): UniFile? {
-        return mihonUri?.let { UniFile.fromUri(context, it)?.findFile("downloads")?.findFile("Local PDF (ALL)") }
+        return mihonUri?.let {
+            UniFile.fromUri(context, it)
+                ?.findFile("downloads")
+                ?.findFile("Local PDF (ALL)")
+        }
     }
 
     suspend fun getPopularManga(page: Int): MangasPage {
@@ -149,7 +156,7 @@ class LocalPDF : HttpSource(), ConfigurableSource {
                 val page = renderer.openPage(i)
 
                 // Use higher resolution for better readability
-                val scale = 2 // scale factor: increase for higher DPI
+                val scale = 1 // scale factor: increase for higher DPI
                 val width = page.width * scale
                 val height = page.height * scale
 
@@ -160,7 +167,7 @@ class LocalPDF : HttpSource(), ConfigurableSource {
                 canvas.drawColor(android.graphics.Color.WHITE)
 
                 // Render the page
-                page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
+                page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                 page.close()
 
                 // Name like page000.jpg
@@ -187,7 +194,9 @@ class LocalPDF : HttpSource(), ConfigurableSource {
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         EditTextPreference(screen.context).apply {
             key = "MIHON_URI"
-            title = "URI to Mihon root folder"
+            title = """URI to Mihon root directory
+                Same as "Settings » Data and storage » Storage loaction"
+            """.trimIndent()
             dialogTitle = "[...]/Mihon"
             summary = preferences.getString(key, "Not set")
             setOnPreferenceChangeListener { preference, newValue ->
