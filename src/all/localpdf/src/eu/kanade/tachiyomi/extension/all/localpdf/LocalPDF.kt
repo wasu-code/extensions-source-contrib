@@ -140,6 +140,8 @@ class LocalPDF : HttpSource(), ConfigurableSource {
             convertPdfToZip(cacheFile, cbzFile)
             copyCbzToOutput(cbzFile, outputDir, mangaName)
 
+            cacheFile.delete()
+
             handler.post {
                 Toast.makeText(context, "Ready!\nYou can start reading now", Toast.LENGTH_SHORT).show()
             }
@@ -157,7 +159,7 @@ class LocalPDF : HttpSource(), ConfigurableSource {
                 val page = renderer.openPage(i)
 
                 // Use higher resolution for better readability
-                val scale = 2 // scale factor: increase for higher DPI
+                val scale = preferences.getInt("SCALE", 2) // scale factor: increase for higher DPI
                 val width = page.width * scale
                 val height = page.height * scale
 
@@ -232,6 +234,27 @@ class LocalPDF : HttpSource(), ConfigurableSource {
               └── seriesName3/
             """.trimIndent()
             setEnabled(false)
+        }.also(screen::addPreference)
+
+        EditTextPreference(screen.context).apply {
+            key = "SCALE"
+            title = "Scale Factor"
+            dialogTitle = "Set Scale Factor"
+            val currentScale = preferences.getString(key, "2")
+            summary = """
+                Set the scale for PDF rendering.
+                Current: $currentScale (default: 2)
+            """.trimIndent()
+            setOnBindEditTextListener { editText ->
+                editText.inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            }
+            setOnPreferenceChangeListener { _, newValue ->
+                summary = """
+                    Set the scale for PDF rendering.
+                    Current value: $newValue (default: 2)
+                """.trimIndent()
+                true
+            }
         }.also(screen::addPreference)
     }
 
