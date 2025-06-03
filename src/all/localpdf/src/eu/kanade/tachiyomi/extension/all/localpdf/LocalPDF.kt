@@ -3,20 +3,18 @@
 package eu.kanade.tachiyomi.extension.all.localpdf
 
 import android.app.Application
-import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
-import android.os.Build
-import android.os.Environment
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.widget.Toast
-import androidx.annotation.RequiresApi
 import androidx.preference.EditTextPreference
 import androidx.preference.PreferenceScreen
+import com.hippo.unifile.UniFile
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -34,42 +32,40 @@ import java.io.FileOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-@RequiresApi(Build.VERSION_CODES.O)
 class LocalPDF : HttpSource(), ConfigurableSource {
+
+    companion object {
+        /** Extension package name */
+        const val PACKAGE_NAME = "eu.kanade.tachiyomi.extension.all.localpdf"
+    }
 
     override val name = "Local PDF"
     override val lang = "all"
     override val supportsLatest = false
     override val baseUrl: String = ""
 
-    companion object {
-        const val DEFAULT_INPUT_DIR = "/storage/emulated/0/Mihon/localpdf"
-        const val DEFAULT_OUTPUT_DIR = "/storage/emulated/0/Mihon/downloads/Local PDF (ALL)"
-        const val COMPANION_PACKAGE_NAME = "eu.kanade.tachiyomi.extension.all.localpdf.companion"
-        const val HELPER_ACTIVITY = "$COMPANION_PACKAGE_NAME.FileHandlerActivity"
-    }
-
     private val handler by lazy { Handler(Looper.getMainLooper()) }
     private val context = Injekt.get<Application>()
     private val preferences: SharedPreferences by getPreferencesLazy()
 
-    private val INPUT_DIR = preferences.getString("INPUT_DIR", DEFAULT_INPUT_DIR) ?: DEFAULT_INPUT_DIR
-    private val OUTPUT_DIR = preferences.getString("OUTPUT_DIR", DEFAULT_OUTPUT_DIR) ?: DEFAULT_OUTPUT_DIR
+    private val mihonUri = preferences.getString("MIHON_URI", null)?.let { Uri.parse(it) }
 
-    private fun isHelperNeeded(): Boolean {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            return !Environment.isExternalStorageManager()
-        }
-        return false
+    private fun getInputDir(): UniFile? {
+        return mihonUri?.let { UniFile.fromUri(context, it)?.findFile("localpdf") }
+    }
+
+    private fun getOutputDir(): UniFile? {
+        return mihonUri?.let { UniFile.fromUri(context, it)?.findFile("downloads")?.findFile("Local PDF (ALL)") }
     }
 
     suspend fun getPopularManga(page: Int): MangasPage {
-        val mangaDirs = File(INPUT_DIR).listFiles { file -> file.isDirectory } ?: emptyArray()
+        val inputDir = getInputDir()
+        val mangaDirs = inputDir?.listFiles()?.filter { it.isDirectory } ?: emptyList()
 
         val mangaList = mangaDirs.map { dir ->
             SManga.create().apply {
-                title = dir.name
-                url = dir.name // Use folder name as unique URL identifier
+                title = dir.name ?: "Unknown"
+                url = dir.name ?: "unknown"
             }
         }
 
@@ -83,51 +79,62 @@ class LocalPDF : HttpSource(), ConfigurableSource {
     }
 
     suspend fun getChapterList(manga: SManga): List<SChapter> {
-        val mangaDir = File(INPUT_DIR, manga.url)
-        val helperNeeded = isHelperNeeded()
-        if (helperNeeded) storageAction("generateChapterDummies", mangaDir.toString(), null)
+        val inputDir = getInputDir()
+        val mangaDir = inputDir?.findFile(manga.url)?.takeIf { it.isDirectory }
 
-        val pdfFiles = if (!helperNeeded) {
-            mangaDir.listFiles { file -> file.extension.equals("pdf", ignoreCase = true) } ?: emptyArray()
-        } else {
-            mangaDir.listFiles { file -> file.name.endsWith(".dummy", ignoreCase = true) } ?: emptyArray()
-        }
+        val pdfFiles = mangaDir?.listFiles()?.filter {
+            it.name?.endsWith(".pdf", ignoreCase = true) == true
+        } ?: emptyList()
 
-//        val pdfFiles = mangaDir.listFiles { file -> file.extension.equals("pdf", ignoreCase = true) }?.takeIf { it.isNotEmpty() }
-//            ?: mangaDir.listFiles { file -> file.name.endsWith(".dummy", ignoreCase = true) } ?: emptyArray()
-
-        val chapterNames = pdfFiles.map { file ->
-            file.nameWithoutExtension.replace(".dummy", "", ignoreCase = true)
-        }
-
-        return chapterNames.map { pdf ->
+        return pdfFiles.map { pdf ->
             SChapter.create().apply {
-                name = pdf
-                url = "${manga.url}/$pdf.pdf"
+                name = pdf.name?.removeSuffix(".pdf") ?: "chapter"
+                url = "${manga.url}/${pdf.name}"
+            }
+        }
+    }
+
+    private fun copyCbzToOutput(cbzFile: File, outputDir: UniFile?, mangaName: String) {
+        val mangaFolder = outputDir?.findFile(mangaName) ?: outputDir?.createDirectory(mangaName)
+        val cbzUniFile = mangaFolder?.createFile(cbzFile.name)
+
+        cbzUniFile?.let {
+            context.contentResolver.openOutputStream(it.uri)?.use { output ->
+                cbzFile.inputStream().copyTo(output)
             }
         }
     }
 
     suspend fun getPageList(chapter: SChapter): List<Page> {
         handler.post {
-            Toast.makeText(context, "Converting pages... (ignore No Pages toast)", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Converting pages... \n(ignore \"No Pages\" toast)", Toast.LENGTH_SHORT).show()
         }
 
-        if (!isHelperNeeded()) {
-            val pdfPath = "$INPUT_DIR/${chapter.url}"
-            val pdfFile = File(pdfPath)
-            val chapterName = pdfFile.nameWithoutExtension
-            val mangaName = pdfFile.parentFile?.name ?: "unknown"
+        val mangaName = chapter.url.substringBefore("/")
+        val chapterFileName = chapter.url.substringAfter("/")
 
-            val outputDir = File("$OUTPUT_DIR/$mangaName")
-            outputDir.mkdirs()
+        val inputDir = getInputDir()
+        val outputDir = getOutputDir()
 
-            val zipFile = File(outputDir, "$chapterName.cbz")
-            convertPdfToZip(File(pdfPath), zipFile)
-            Toast.makeText(context, "Ready! You can start reading now", Toast.LENGTH_SHORT)
-                .show()
-        } else {
-            storageAction("convert", "$INPUT_DIR/${chapter.url}", OUTPUT_DIR)
+        val pdfFile = inputDir
+            ?.findFile(mangaName)
+            ?.findFile(chapterFileName)
+
+        pdfFile?.let {
+            val cacheFile = File(context.cacheDir, it.name ?: "temp.pdf")
+            context.contentResolver.openInputStream(it.uri)?.use { input ->
+                cacheFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+
+            val cbzFile = File(context.cacheDir, "${chapterFileName.removeSuffix(".pdf")}.cbz")
+            convertPdfToZip(cacheFile, cbzFile)
+            copyCbzToOutput(cbzFile, outputDir, mangaName)
+
+            handler.post {
+                Toast.makeText(context, "Ready!\nYou can start reading now", Toast.LENGTH_SHORT).show()
+            }
         }
 
         return emptyList()
@@ -177,51 +184,26 @@ class LocalPDF : HttpSource(), ConfigurableSource {
         descriptor.close()
     }
 
-    private fun storageAction(action: String, from: String?, to: String?) {
-        handler.post {
-            Toast.makeText(context, "Requesting help from Companion app (if installed)", Toast.LENGTH_LONG).show()
-        }
-
-        val intent = Intent().apply {
-            setClassName(COMPANION_PACKAGE_NAME, HELPER_ACTIVITY)
-            putExtra("action", action)
-            putExtra("A", from)
-            putExtra("B", to)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-
-        try {
-            context.startActivity(intent)
-        } catch (e: ActivityNotFoundException) {
-            handler.post {
-                Toast.makeText(context, "Companion app not installed (ActivityNotFoundException)", Toast.LENGTH_LONG).show()
-            }
-        }
-    }
-
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         EditTextPreference(screen.context).apply {
-            key = "INPUT_DIR"
-            title = "Folder storing series in PDF format"
-            dialogTitle = "Suggested: $DEFAULT_INPUT_DIR"
-            summary = preferences.getString(key, DEFAULT_INPUT_DIR) ?: DEFAULT_INPUT_DIR
-            setDefaultValue(DEFAULT_INPUT_DIR)
+            key = "MIHON_URI"
+            title = "URI to Mihon root folder"
+            dialogTitle = "[...]/Mihon"
+            summary = preferences.getString(key, "Not set")
             setOnPreferenceChangeListener { preference, newValue ->
                 val value = newValue as String
                 preference.summary = value
                 Toast.makeText(context, "Restart app to apply changes", Toast.LENGTH_LONG).show()
                 true
             }
-//            setOnPreferenceClickListener {
-//                val intent = Intent().apply {
-//                    setClassName(context, FileHandlerActivity::class.java.name)
-//                    putExtra("action", "safRequest")
-//                    putExtra("request_code", 1001)
-//                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-//                }
-//                context.startActivity(intent)
-//                true
-//            }
+            setOnPreferenceClickListener {
+                val intent = Intent().apply {
+                    setClassName(PACKAGE_NAME, UriPickerActivity::class.java.name)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                true
+            }
         }.also(screen::addPreference)
 
         EditTextPreference(screen.context).apply {
@@ -235,25 +217,7 @@ class LocalPDF : HttpSource(), ConfigurableSource {
                 ├── seriesName2/
                 └── seriesName3/
             """.trimIndent()
-        }.also(screen::addPreference)
-
-        EditTextPreference(screen.context).apply {
-            key = "OUTPUT_DIR"
-            title = "Mihon download folder (as in Settings » Data & Storage)"
-            dialogTitle = "Should end with `.../downloads/Local PDF (ALL)` and be in Mihon directory"
-            summary = preferences.getString(key, DEFAULT_OUTPUT_DIR) ?: DEFAULT_OUTPUT_DIR
-            setDefaultValue(DEFAULT_OUTPUT_DIR)
-            setOnPreferenceChangeListener { preference, newValue ->
-                val value = newValue as String
-                return@setOnPreferenceChangeListener if (value.endsWith("downloads/Local PDF (ALL)")) {
-                    preference.summary = value
-                    Toast.makeText(context, "Restart app to apply changes", Toast.LENGTH_LONG).show()
-                    true // Save the new value
-                } else {
-                    Toast.makeText(screen.context, "Path must end with `downloads/Local PDF (ALL)`", Toast.LENGTH_LONG).show()
-                    false // Reject the value
-                }
-            }
+            setEnabled(false)
         }.also(screen::addPreference)
     }
 
