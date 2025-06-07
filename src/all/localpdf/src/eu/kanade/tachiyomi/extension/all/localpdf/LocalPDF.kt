@@ -5,6 +5,9 @@ package eu.kanade.tachiyomi.extension.all.localpdf
 import android.app.Application
 import android.content.Intent
 import android.content.SharedPreferences
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.widget.Toast
@@ -71,9 +74,59 @@ class LocalPDF : HttpSource(), ConfigurableSource {
 
     @Suppress("unused")
     suspend fun getMangaDetails(manga: SManga): SManga {
-        manga.description = "This manga is generated from PDF"
-        manga.status = SManga.COMPLETED
+        val inputDir = getInputDir()
+        val mangaDir = inputDir?.findFile(manga.url)?.takeIf { it.isDirectory }
+
+        if (mangaDir != null) {
+            val coverFile = getOrCreateCover(mangaDir)
+
+            coverFile?.let {
+                manga.thumbnail_url = it.uri.toString()
+            }
+        }
+
         return manga
+    }
+
+    private fun getOrCreateCover(mangaDir: UniFile): UniFile? {
+        val existingCover = mangaDir.listFiles()
+            ?.firstOrNull { file ->
+                val nameWithoutExt = file.name?.substringBeforeLast('.')?.lowercase() ?: return@firstOrNull false
+                nameWithoutExt == "cover" && isImage(file)
+            }
+
+        if (existingCover != null) return existingCover
+
+        val firstPdf = mangaDir.listFiles()
+            ?.filter { it.name?.endsWith(".pdf", ignoreCase = true) == true }
+            ?.minByOrNull { it.name.orEmpty() }
+            ?: return null
+
+        val descriptor = context.contentResolver.openFileDescriptor(firstPdf.uri, "r") ?: return null
+        val renderer = PdfRenderer(descriptor)
+
+        val page = renderer.openPage(0)
+        val bitmap = Bitmap.createBitmap(page.width, page.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        canvas.drawColor(Color.WHITE)
+        page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+        page.close()
+
+        val coverFile = mangaDir.createFile("cover.jpg")
+        context.contentResolver.openOutputStream(coverFile!!.uri)?.use { out ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+        }
+
+        bitmap.recycle()
+        renderer.close()
+        descriptor.close()
+
+        return coverFile
+    }
+
+    private fun isImage(file: UniFile): Boolean {
+        val type = context.contentResolver.getType(file.uri) ?: return false
+        return type.startsWith("image/")
     }
 
     @Suppress("unused")
