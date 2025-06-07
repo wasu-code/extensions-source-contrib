@@ -1,16 +1,12 @@
-@file:Suppress("unused", "RedundantSuspendModifier", "UNUSED_PARAMETER")
+@file:Suppress("RedundantSuspendModifier", "UNUSED_PARAMETER")
 
 package eu.kanade.tachiyomi.extension.all.localpdf
 
 import android.app.Application
 import android.content.Intent
 import android.content.SharedPreferences
-import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
-import android.os.Handler
-import android.os.Looper
-import android.os.ParcelFileDescriptor
 import android.widget.Toast
 import androidx.preference.EditTextPreference
 import androidx.preference.PreferenceScreen
@@ -27,11 +23,8 @@ import okhttp3.Request
 import okhttp3.Response
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
-import java.io.File
-import java.io.FileOutputStream
-import java.util.zip.ZipEntry
-import java.util.zip.ZipOutputStream
 
+@Suppress("unused")
 class LocalPDF : HttpSource(), ConfigurableSource {
 
     companion object {
@@ -44,7 +37,6 @@ class LocalPDF : HttpSource(), ConfigurableSource {
     override val supportsLatest = false
     override val baseUrl: String = ""
 
-    private val handler by lazy { Handler(Looper.getMainLooper()) }
     private val context = Injekt.get<Application>()
     private val preferences: SharedPreferences by getPreferencesLazy()
 
@@ -57,14 +49,12 @@ class LocalPDF : HttpSource(), ConfigurableSource {
         }
     }
 
-    private fun getOutputDir(): UniFile? {
-        return mihonUri?.let {
-            UniFile.fromUri(context, it)
-                ?.findFile("downloads")
-                ?.findFile("Local PDF (ALL)")
-        }
-    }
+    private val scale = preferences.getString("SCALE", null)?.toIntOrNull() ?: 2
+    override val client = network.client.newBuilder()
+        .addInterceptor(PdfPageInterceptor(context, getInputDir(), scale))
+        .build()
 
+    @Suppress("unused")
     suspend fun getPopularManga(page: Int): MangasPage {
         val inputDir = getInputDir() ?: throw IllegalStateException("Input directory URI is not set.\nPlease set it first in the extension's settings.")
         val mangaDirs = inputDir.listFiles()?.filter { it.isDirectory } ?: emptyList()
@@ -79,12 +69,14 @@ class LocalPDF : HttpSource(), ConfigurableSource {
         return MangasPage(mangaList, hasNextPage = false)
     }
 
+    @Suppress("unused")
     suspend fun getMangaDetails(manga: SManga): SManga {
         manga.description = "This manga is generated from PDF"
         manga.status = SManga.COMPLETED
         return manga
     }
 
+    @Suppress("unused")
     suspend fun getChapterList(manga: SManga): List<SChapter> {
         val inputDir = getInputDir()
         val mangaDir = inputDir?.findFile(manga.url)?.takeIf { it.isDirectory }
@@ -102,96 +94,31 @@ class LocalPDF : HttpSource(), ConfigurableSource {
         }
     }
 
-    private fun copyCbzToOutput(cbzFile: File, outputDir: UniFile?, mangaName: String) {
-        val mangaFolder = outputDir?.findFile(mangaName) ?: outputDir?.createDirectory(mangaName)
-        val cbzUniFile = mangaFolder?.createFile(cbzFile.name)
-
-        cbzUniFile?.let {
-            context.contentResolver.openOutputStream(it.uri)?.use { output ->
-                cbzFile.inputStream().copyTo(output)
-            }
-        }
-    }
-
+    @Suppress("unused")
     suspend fun getPageList(chapter: SChapter): List<Page> {
-        handler.post {
-            Toast.makeText(context, "Converting pages...", Toast.LENGTH_SHORT).show()
-        }
-
         val mangaName = chapter.url.substringBefore("/")
         val chapterFileName = chapter.url.substringAfter("/")
 
         val inputDir = getInputDir()
-        val outputDir = getOutputDir()
-
         val pdfFile = inputDir
             ?.findFile(mangaName)
             ?.findFile(chapterFileName)
 
-        pdfFile?.let {
-            val cacheFile = File(context.cacheDir, it.name ?: "temp.pdf")
-            context.contentResolver.openInputStream(it.uri)?.use { input ->
-                cacheFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            }
-
-            val cbzFile = File(context.cacheDir, "${chapterFileName.removeSuffix(".pdf")}.cbz")
-            convertPdfToZip(cacheFile, cbzFile)
-            copyCbzToOutput(cbzFile, outputDir, mangaName)
-
-            cacheFile.delete()
-
-            handler.post {
-                Toast.makeText(context, "Ready!\nYou can start reading now", Toast.LENGTH_SHORT).show()
-            }
+        if (pdfFile == null) {
+            return emptyList()
         }
 
-        return emptyList()
-    }
-
-    private fun convertPdfToZip(pdfFile: File, zipFile: File) {
-        val descriptor = ParcelFileDescriptor.open(pdfFile, ParcelFileDescriptor.MODE_READ_ONLY)
-        val renderer = PdfRenderer(descriptor)
-
-        ZipOutputStream(FileOutputStream(zipFile)).use { zipOut ->
-            for (i in 0 until renderer.pageCount) {
-                val page = renderer.openPage(i)
-
-                // Use higher resolution for better readability
-                val scale = preferences.getInt("SCALE", 2) // scale factor: increase for higher DPI
-                val width = page.width * scale
-                val height = page.height * scale
-
-                val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-
-                // Clear the bitmap to white to avoid black background
-                val canvas = android.graphics.Canvas(bitmap)
-                canvas.drawColor(android.graphics.Color.WHITE)
-
-                // Render the page
-                page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                page.close()
-
-                // Name like page000.jpg
-                val paddedIndex = String.format("%03d", i)
-                val imageEntryName = "page$paddedIndex.jpg"
-
-                // Write to ZIP
-                val tempImgFile = File.createTempFile("page$paddedIndex", ".jpg")
-                FileOutputStream(tempImgFile).use { out ->
-                    bitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
-                }
-
-                zipOut.putNextEntry(ZipEntry(imageEntryName))
-                zipOut.write(tempImgFile.readBytes())
-                zipOut.closeEntry()
-                tempImgFile.delete()
-            }
-        }
-
+        val descriptor = context.contentResolver.openFileDescriptor(pdfFile.uri, "r")
+        val renderer = PdfRenderer(descriptor!!)
+        val pageCount = renderer.pageCount
         renderer.close()
         descriptor.close()
+
+        val pages = (0 until pageCount).map { pageIndex ->
+            Page(index = pageIndex, imageUrl = "http://localpdf/$mangaName/$chapterFileName/page${String.format("%03d", pageIndex)}")
+        }
+
+        return pages
     }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
@@ -253,6 +180,7 @@ class LocalPDF : HttpSource(), ConfigurableSource {
                     Set the scale for PDF rendering.
                     Current value: $newValue (default: 2)
                 """.trimIndent()
+                Toast.makeText(context, "Restart app to apply changes", Toast.LENGTH_LONG).show()
                 true
             }
         }.also(screen::addPreference)
