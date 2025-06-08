@@ -102,6 +102,10 @@ class AnyWeb : ConfigurableSource, ParsedHttpSource() {
         return Observable.fromCallable {
             val document = client.newCall(GET(manga.url, headers)).execute().asJsoup()
 
+            // Ignore links in footer/header
+            val excludeSelector = preferences.getString("INDEX_EXCLUDE_SELECTOR", null) ?: EXCLUDE_SELECTOR_DEFAULTS
+            document.select(excludeSelector).forEach { it.remove() }
+
             val maxDepth = 3
 
             val selectors = mutableListOf<String>()
@@ -190,6 +194,9 @@ class AnyWeb : ConfigurableSource, ParsedHttpSource() {
 
             if (imgUrl in seenUrls) return@mapIndexedNotNull null
             seenUrls += imgUrl
+
+            // Skip SVG images as mihon doesn't support them
+            if (imgUrl.lowercase().endsWith(".svg")) return@mapIndexedNotNull null
 
             if (checkSelector && img.closest(excludeSelector) != null) return@mapIndexedNotNull null
 
@@ -362,6 +369,13 @@ class AnyWeb : ConfigurableSource, ParsedHttpSource() {
             setOnBindEditTextListener { editText ->
                 editText.inputType = android.text.InputType.TYPE_CLASS_NUMBER
             }
+        }.also(screen::addPreference)
+
+        EditTextPreference(screen.context).apply {
+            key = "INDEX_EXCLUDE_SELECTOR"
+            title = "Index: CSS selector to exclude"
+            dialogTitle = "Enter CSS selector"
+            setDefaultValue(EXCLUDE_SELECTOR_DEFAULTS)
         }.also(screen::addPreference)
 
         EditTextPreference(screen.context).apply {
